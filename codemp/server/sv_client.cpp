@@ -157,8 +157,8 @@ void SV_DirectConnect( const netadr_t *from ) {
 	Q_strncpyz( userinfo, Cmd_Argv(1), sizeof(userinfo) );
 
 	version = atoi( Info_ValueForKey( userinfo, "protocol" ) );
-	if ( version != PROTOCOL_VERSION ) {
-		NET_OutOfBandPrint( NS_SERVER, from, "print\nServer uses protocol version %i (yours is %i).\n", PROTOCOL_VERSION, version );
+	if ( version != PROTOCOL_VERSION && version != CONSOLE_PROTOCOL_VERSION ) {
+		NET_OutOfBandPrint( NS_SERVER, from, "print\nServer uses protocol versions PC:%i CONSOLE:%i (yours is %i).\n", PROTOCOL_VERSION, CONSOLE_PROTOCOL_VERSION, version );
 		Com_DPrintf ("    rejected connect from version %i\n", version);
 		return;
 	}

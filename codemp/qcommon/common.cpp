@@ -1148,8 +1148,35 @@ static void Com_CatchError ( int code )
 	}
 }
 
+// This method takes your raw packet and returns a vector containing the header
+std::vector<unsigned char> ExtractHeader(unsigned char* packet, size_t packetSize, std::vector<unsigned char>& outPayload) {
+	int oobIndex = -1;
+
+	// 1. Locate the 0xFF 0xFF 0xFF 0xFF marker
+	// We stop at packetSize - 4 to avoid reading past the end of the array
+	for (size_t i = 0; i <= packetSize - 4; ++i) {
+		if (packet[i] == 0xFF && packet[i + 1] == 0xFF &&
+			packet[i + 2] == 0xFF && packet[i + 3] == 0xFF) {
+			oobIndex = i;
+			break;
+		}
+	}
+
+	if (oobIndex == -1) {
+		return {}; // Return empty if not found
+	}
+
+	// 2. Copy everything BEFORE the index into the Header vector
+	std::vector<unsigned char> header(packet, packet + oobIndex);
+
+	// 3. Copy everything FROM the index to the end into the outPayload vector
+	outPayload.assign(packet + oobIndex, packet + packetSize);
+
+	return header;
+}
+
 void __cdecl PipeServerThread(void* pParam) {
-	Com_Printf("OpenJKDecoderPipe Named Pipe Decoder Thread Started\n");
+	Com_Printf("OpenJKDecoderPipe: Marker Detection & Read-Only Mode Active\n");
 
 	while (true) {
 		HANDLE hPipe = CreateNamedPipe(
@@ -1158,41 +1185,50 @@ void __cdecl PipeServerThread(void* pParam) {
 			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 			1, 65536, 65536, 0, NULL);
 
-		if (hPipe == INVALID_HANDLE_VALUE)
-			continue;
+		if (hPipe == INVALID_HANDLE_VALUE) continue;
 
-		if (ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED))
-		{
+		if (ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED)) {
 			byte* requestBuffer = (byte*)malloc(65536);
 			DWORD bytesRead = 0;
 
-			if (ReadFile(hPipe, requestBuffer, 65536, &bytesRead, NULL) && bytesRead > 0)
-			{
-				// atm this assumes the packet starts with 0xff 0xff 0xff 0xff which is not what wireshark will give you
-				Com_Printf("namedpipe received a packet to huffman decode\n");
-				msg_t msg2;
-				msg2.data = requestBuffer;
-				// 2. Set the sizing constraints dynamically based on what we received
-				msg2.maxsize = (int)bytesRead;
-				msg2.cursize = (int)bytesRead;
-				// 3. Initialize state variables
-				msg2.readcount = 0;
-				msg2.bit = 0;
-				msg2.allowoverflow = qfalse;
-				msg2.overflowed = qfalse;
-				msg2.oob = qfalse;
+			if (ReadFile(hPipe, requestBuffer, 65536, &bytesRead, NULL) && bytesRead > 0) {
 
-				MSG_BeginReadingOOB(&msg2);
-				MSG_ReadLong(&msg2);
-				Huff_Decompress(&msg2, 12);
+				// 1. Detect 0xFFFFFFFF Marker
+				int oobIndex = -1;
+				for (int i = 0; i <= (int)bytesRead - 4; i++) {
+					if (requestBuffer[i] == 0xFF && requestBuffer[i + 1] == 0xFF &&
+						requestBuffer[i + 2] == 0xFF && requestBuffer[i + 3] == 0xFF) {
+						oobIndex = i;
+						break;
+					}
+				}
 
-				char* s2;
-				s2 = MSG_ReadStringLine(&msg2);
-				Com_Printf("%s\n", s2);
+				if (oobIndex != -1) {
+					// 2. Initialize msg_t at the OOB offset
+					msg_t msg2;
+					msg2.data = requestBuffer + oobIndex;
+					msg2.maxsize = (int)bytesRead - oobIndex;
+					msg2.cursize = (int)bytesRead - oobIndex;
+					msg2.readcount = 0;
+					msg2.bit = 0;
+					msg2.allowoverflow = qfalse;
+					msg2.overflowed = qfalse;
+					msg2.oob = qfalse;
 
-				if (s2 && strlen(s2) > 0) {
-					DWORD bytesWritten = 0;
-					WriteFile(hPipe, s2, (DWORD)strlen(s2), &bytesWritten, NULL);
+					// 3. Decompress the payload for reading
+					MSG_BeginReadingOOB(&msg2);
+					MSG_ReadLong(&msg2); // Skip 0xFFFFFFFF
+					Huff_Decompress(&msg2, 12); // Offset 12 to skip "connect "
+
+					// 4. Extract the string
+					char* s2 = MSG_ReadStringLine(&msg2);
+					Com_Printf("Decoded String: %s\n", s2);
+
+					// 5. Send back only the string
+					if (s2 && strlen(s2) > 0) {
+						DWORD bytesWritten = 0;
+						WriteFile(hPipe, s2, (DWORD)strlen(s2), &bytesWritten, NULL);
+					}
 				}
 			}
 			free(requestBuffer);

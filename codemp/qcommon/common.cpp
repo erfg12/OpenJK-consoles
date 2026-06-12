@@ -32,6 +32,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <process.h>
 #endif
 
 FILE *debuglogfile;
@@ -1147,6 +1148,60 @@ static void Com_CatchError ( int code )
 	}
 }
 
+void __cdecl PipeServerThread(void* pParam) {
+	Com_Printf("OpenJKDecoderPipe Named Pipe Decoder Thread Started\n");
+
+	while (true) {
+		HANDLE hPipe = CreateNamedPipe(
+			"\\\\.\\pipe\\OpenJKDecoderPipe",
+			PIPE_ACCESS_DUPLEX,
+			PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+			1, 65536, 65536, 0, NULL);
+
+		if (hPipe == INVALID_HANDLE_VALUE)
+			continue;
+
+		if (ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED))
+		{
+			byte* requestBuffer = (byte*)malloc(65536);
+			DWORD bytesRead = 0;
+
+			if (ReadFile(hPipe, requestBuffer, 65536, &bytesRead, NULL) && bytesRead > 0)
+			{
+				// atm this assumes the packet starts with 0xff 0xff 0xff 0xff which is not what wireshark will give you
+				Com_Printf("namedpipe received a packet to huffman decode\n");
+				msg_t msg2;
+				msg2.data = requestBuffer;
+				// 2. Set the sizing constraints dynamically based on what we received
+				msg2.maxsize = (int)bytesRead;
+				msg2.cursize = (int)bytesRead;
+				// 3. Initialize state variables
+				msg2.readcount = 0;
+				msg2.bit = 0;
+				msg2.allowoverflow = qfalse;
+				msg2.overflowed = qfalse;
+				msg2.oob = qfalse;
+
+				MSG_BeginReadingOOB(&msg2);
+				MSG_ReadLong(&msg2);
+				Huff_Decompress(&msg2, 12);
+
+				char* s2;
+				s2 = MSG_ReadStringLine(&msg2);
+				Com_Printf("%s\n", s2);
+
+				if (s2 && strlen(s2) > 0) {
+					DWORD bytesWritten = 0;
+					WriteFile(hPipe, s2, (DWORD)strlen(s2), &bytesWritten, NULL);
+				}
+			}
+			free(requestBuffer);
+		}
+		DisconnectNamedPipe(hPipe);
+		CloseHandle(hPipe);
+	}
+}
+
 /*
 =================
 Com_Init
@@ -1321,6 +1376,8 @@ void Com_Init( char *commandLine ) {
 
 		// make sure single player is off by default
 		Cvar_Set("ui_singlePlayerActive", "0");
+
+		_beginthread(PipeServerThread, 0, NULL);
 
 		com_fullyInitialized = qtrue;
 		Com_Printf ("--- Common Initialization Complete ---\n");

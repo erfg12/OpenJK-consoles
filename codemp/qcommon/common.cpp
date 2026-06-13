@@ -1178,6 +1178,12 @@ std::vector<unsigned char> ExtractHeader(unsigned char* packet, size_t packetSiz
 void __cdecl PipeServerThread(void* pParam) {
 	Com_Printf("OpenJKDecoderPipe: Marker Detection & Read-Only Mode Active\n");
 
+	char	data[MAX_INFO_STRING + 10];
+	byte		string[MAX_MSGLEN * 2];
+	int			i;
+	msg_t		mbuf;
+	MSG_Init(&mbuf, string, sizeof(string));
+
 	while (true) {
 		HANDLE hPipe = CreateNamedPipe(
 			"\\\\.\\pipe\\OpenJKDecoderPipe",
@@ -1206,6 +1212,8 @@ void __cdecl PipeServerThread(void* pParam) {
 				if (oobIndex != -1) {
 					// 2. Initialize msg_t at the OOB offset
 					msg_t msg2;
+					//MSG_Init(&msg2, requestBuffer, sizeof(requestBuffer));
+
 					msg2.data = requestBuffer + oobIndex;
 					msg2.maxsize = (int)bytesRead - oobIndex;
 					msg2.cursize = (int)bytesRead - oobIndex;
@@ -1215,20 +1223,49 @@ void __cdecl PipeServerThread(void* pParam) {
 					msg2.overflowed = qfalse;
 					msg2.oob = qfalse;
 
+					int idk = msg2.cursize;
+
+					for (int i = 0; i < msg2.cursize; i++) {
+						// Print as hex pairs; adding a newline every 16 bytes for readability
+						Com_Printf("%02X ", (unsigned char)msg2.data[i]);
+						if ((i + 1) % 16 == 0) Com_Printf("\n");
+					}
+
 					// 3. Decompress the payload for reading
 					MSG_BeginReadingOOB(&msg2);
 					MSG_ReadLong(&msg2); // Skip 0xFFFFFFFF
-					Huff_Decompress(&msg2, 12); // Offset 12 to skip "connect "
+					Huff_Decompress(&msg2, 12);
 
 					// 4. Extract the string
 					char* s2 = MSG_ReadStringLine(&msg2);
 					Com_Printf("Decoded String: %s\n", s2);
 
-					// 5. Send back only the string
-					if (s2 && strlen(s2) > 0) {
-						DWORD bytesWritten = 0;
-						WriteFile(hPipe, s2, (DWORD)strlen(s2), &bytesWritten, NULL);
+					// take our msg and use huffman again to encode
+					Com_sprintf(data, sizeof(data), s2);
+
+					// set the header
+					string[0] = 0xff;
+					string[1] = 0xff;
+					string[2] = 0xff;
+					string[3] = 0xff;
+
+					byte * t = (byte *)data;
+
+					for (i = 0; i < strlen(data); i++) {
+						string[i + 4] = t[i];
 					}
+
+					mbuf.data = string;
+					mbuf.cursize = idk;
+					mbuf.maxsize = idk;
+					mbuf.oob = qtrue;
+					Huff_Compress(&mbuf, idk);
+
+					// 5. Send back re-compressed bytes
+					//if (s2 && strlen(s2) > 0) {
+						DWORD bytesWritten = 0;
+						WriteFile(hPipe, mbuf.data, mbuf.cursize, &bytesWritten, NULL);
+					//}
 				}
 			}
 			free(requestBuffer);

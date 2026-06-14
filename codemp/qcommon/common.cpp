@@ -35,6 +35,11 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include <process.h>
 #endif
 
+#include <unordered_map>
+#include <string>
+#include <sstream>
+#include <vector>
+
 FILE *debuglogfile;
 fileHandle_t logfile;
 fileHandle_t	com_journalFile;			// events are written here
@@ -1175,6 +1180,55 @@ std::vector<unsigned char> ExtractHeader(unsigned char* packet, size_t packetSiz
 	return header;
 }
 
+// Parse "\key\value\key\value..." into an ordered map (vector of pairs to preserve order)
+std::vector<std::pair<std::string, std::string>> ParseUserInfo(const char* userinfo) {
+	std::vector<std::pair<std::string, std::string>> kvs;
+	std::string s(userinfo);
+
+	// Strip leading "connect \"" and trailing "\""
+	size_t start = s.find('"');
+	size_t end = s.rfind('"');
+	if (start == std::string::npos || end == std::string::npos || start == end)
+		return kvs;
+	s = s.substr(start + 1, end - start - 1);
+
+	// Split on backslash
+	std::vector<std::string> tokens;
+	std::stringstream ss(s);
+	std::string token;
+	while (std::getline(ss, token, '\\')) {
+		if (!token.empty())
+			tokens.push_back(token);
+	}
+
+	// Pair them up
+	for (size_t i = 0; i + 1 < tokens.size(); i += 2)
+		kvs.push_back({ tokens[i], tokens[i + 1] });
+
+	return kvs;
+}
+
+// Set or replace a key
+void SetUserInfoKey(std::vector<std::pair<std::string, std::string>>& kvs,
+	const std::string& key, const std::string& value) {
+	for (auto& kv : kvs) {
+		if (kv.first == key) {
+			kv.second = value;
+			return;
+		}
+	}
+	kvs.push_back({ key, value }); // add if not found
+}
+
+// Serialize back to connect "\key\value..."
+std::string SerializeUserInfo(const std::vector<std::pair<std::string, std::string>>& kvs) {
+	std::string result = "connect \"";
+	for (const auto& kv : kvs)
+		result += "\\" + kv.first + "\\" + kv.second;
+	result += "\"";
+	return result;
+}
+
 void PrintHex(byte* data, int size, const char* label) {
 	Com_Printf("\n%s (%d bytes)\n", label, size);
 	for (int i = 0; i < size; i++) {
@@ -1225,9 +1279,16 @@ void __cdecl PipeServerThread(void* pParam) {
 
 				Com_Printf("[NAMEDPIPE:DECODED]: %s\n", s2);
 
+				// replace protocol number with 26 to connect to PC servers
+				auto kvs = ParseUserInfo(s2);
+				SetUserInfoKey(kvs, "protocol", "26");
+				std::string modified = SerializeUserInfo(kvs);
+
+				Com_Printf("[NAMEDPIPE:MODIFIED]: %s\n", modified.c_str());
+
 				// Re-encode
 				char data[MAX_INFO_STRING + 10];
-				Com_sprintf(data, sizeof(data), "%s", s2);
+				Com_sprintf(data, sizeof(data), "%s", modified.c_str());
 				byte* format = (byte*)data;
 				byte string[MAX_MSGLEN];
 				int i;
